@@ -112,23 +112,23 @@ class ConfigLoader:
                 raw_b64 = await self._client.get_file_content(
                     owner, repo, _CONFIG_PATH, installation_id
                 )
-        except httpx.HTTPStatusError as exc:
-            # `get_file_content` already maps 404 to None, but a 404 can still
-            # arrive here from another layer. The previous version tested
-            # `getattr(exc, "status_code")`, which httpx.HTTPStatusError does
-            # not define — the branch could never fire, so a missing config
-            # propagated as a 500 instead of disabling the bot for that repo.
-            if exc.response.status_code == 404:
+            except httpx.HTTPStatusError as exc:
+                # `get_file_content` already maps 404 to None, but a 404 can still
+                # arrive here from another layer. The previous version tested
+                # `getattr(exc, "status_code")`, which httpx.HTTPStatusError does
+                # not define — the branch could never fire, so a missing config
+                # propagated as a 500 instead of disabling the bot for that repo.
+                if exc.response.status_code == 404:
+                    log.debug("No config for %s — bot disabled", key)
+                    self._store(key, None)
+                    return None
+                log.error("Failed loading config for %s: %s", key, exc)
+                raise
+
+            if raw_b64 is None:
                 log.debug("No config for %s — bot disabled", key)
                 self._store(key, None)
                 return None
-            log.error("Failed loading config for %s: %s", key, exc)
-            raise
-
-            if raw_b64 is None:
-            log.debug("No config for %s — bot disabled", key)
-            self._store(key, None)
-            return None
 
             config = self._parse(key, raw_b64)
             self._store(key, config)
