@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import time
@@ -67,6 +68,7 @@ class ConfigLoader:
     def __init__(self, github_client: GitHubClient) -> None:
         self._client = github_client
         self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
+        self._in_flight: dict[str, asyncio.Event] = {}
         self._hits = 0
         self._misses = 0
 
@@ -89,12 +91,27 @@ class ConfigLoader:
             self._cache.move_to_end(key)
             return entry.config
 
+        # Coalesce concurrent misses for the same repository. The first
+        # coroutine owns the fetch; later callers wait for it and then take
+        # the normal cache fast path. This prevents webhook bursts from
+        # multiplying identical GitHub API requests.
+        while key in self._in_flight:
+            await self._in_flight[key].wait()
+            entry = self._cache.get(key)
+            if entry is not None and entry.fresh:
+                self._hits += 1
+                self._cache.move_to_end(key)
+                return entry.config
+
+        event = asyncio.Event()
+        self._in_flight[key] = event
         self._misses += 1
 
         try:
-            raw_b64 = await self._client.get_file_content(
-                owner, repo, _CONFIG_PATH, installation_id
-            )
+            try:
+                raw_b64 = await self._client.get_file_content(
+                    owner, repo, _CONFIG_PATH, installation_id
+                )
         except httpx.HTTPStatusError as exc:
             # `get_file_content` already maps 404 to None, but a 404 can still
             # arrive here from another layer. The previous version tested
@@ -108,15 +125,18 @@ class ConfigLoader:
             log.error("Failed loading config for %s: %s", key, exc)
             raise
 
-        if raw_b64 is None:
+            if raw_b64 is None:
             log.debug("No config for %s — bot disabled", key)
             self._store(key, None)
             return None
 
-        config = self._parse(key, raw_b64)
-        self._store(key, config)
-        log.info("Loaded config for %s", key)
-        return config
+            config = self._parse(key, raw_b64)
+            self._store(key, config)
+            log.info("Loaded config for %s", key)
+            return config
+        finally:
+            event.set()
+            self._in_flight.pop(key, None)
 
     # ── Parsing ───────────────────────────────────────────────
 
