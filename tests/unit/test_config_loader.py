@@ -1,5 +1,6 @@
 # tests/unit/test_config_loader.py — per-repo config loading (#43)
 
+import asyncio
 import base64
 from unittest.mock import AsyncMock, Mock
 
@@ -58,6 +59,33 @@ async def test_installation_id_is_passed_through():
     client.get_file_content.assert_awaited_once_with(
         "hiero", "sdk-js", ".github/hiero-bot.yml", 42
     )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cache_misses_are_coalesced():
+    """Concurrent webhook bursts should issue one GitHub contents request."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fetch(*_args):
+        started.set()
+        await release.wait()
+        return encode(VALID_YAML)
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    tasks = [loader.load("hiero", "sdk-js", 42) for _ in range(10)]
+    gather = asyncio.gather(*tasks)
+    await started.wait()
+    assert client.get_file_content.await_count == 1
+    release.set()
+
+    results = await gather
+    assert all(result is not None for result in results)
+    assert client.get_file_content.await_count == 1
+
 
 
 @pytest.mark.asyncio
